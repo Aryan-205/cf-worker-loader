@@ -25,7 +25,7 @@ import {
   setRequired,
   type InputType,
 } from "../lib/formBuilder";
-import FlowBuilder from "./FlowBuilder";
+import DynamicFlowBuilder from "./DynamicFlowBuilder";
 
 type FormDoc = {
   _id: string;
@@ -306,9 +306,9 @@ export default function FormBuilder({
       <div className="form-builder-flow">
         <h3 className="form-builder-subheading">Flow</h3>
         <p className="form-builder-hint-inline">
-          Build the sequence: Start → Form pages and Scripts → End. Add steps above, then drag to reorder.
+          Build your flow visually: drag nodes, connect handles. Scripts branch on Success (✓) or Error (✗).
         </p>
-        <FlowBuilder
+        <DynamicFlowBuilder
           flow={flow}
           onFlowChange={onFlowChange}
           pages={pages}

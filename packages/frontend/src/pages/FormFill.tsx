@@ -1,4 +1,4 @@
-import type { FlowStep, PageDef } from "@orcratration/shared";
+import type { FlowStep, PageDef, PageStep, ScriptStep, StartStep, EndStep, StepId } from "@orcratration/shared";
 import { useCallback, useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
 
@@ -13,17 +13,55 @@ type FormBySlug = {
   scripts: { scriptId: string; event: string; order: number }[];
 };
 
+function generateId(): string {
+  return "step-" + Math.random().toString(36).slice(2, 9);
+}
+
+/** Build a flow from legacy format if no flow array is present */
 function buildFlow(form: FormBySlug): FlowStep[] {
   if (form.flow?.length) return form.flow;
-  const steps: FlowStep[] = (form.pages ?? []).map((p) => ({ type: "page", pageId: p.id }));
-  const scriptSteps = (form.scripts ?? [])
-    .sort((a, b) => a.order - b.order)
-    .map((s) => ({ type: "script" as const, scriptId: s.scriptId, event: s.event }));
-  return [...steps, ...scriptSteps];
+
+  // Legacy conversion: create linear flow from pages + scripts
+  const steps: FlowStep[] = [];
+  const startId = generateId();
+  let prevId: string | undefined = startId;
+
+  steps.push({ id: startId, type: "start", next: undefined } as StartStep);
+
+  for (const page of form.pages ?? []) {
+    const pageStepId = generateId();
+    if (prevId) {
+      const prevStep = steps.find((s) => s.id === prevId);
+      if (prevStep?.type === "start") (prevStep as StartStep).next = pageStepId;
+      if (prevStep?.type === "page") (prevStep as PageStep).onSubmit = pageStepId;
+      if (prevStep?.type === "script") (prevStep as ScriptStep).onSuccess = pageStepId;
+    }
+    steps.push({ id: pageStepId, type: "page", pageId: page.id } as PageStep);
+    prevId = pageStepId;
+  }
+
+  const endId = generateId();
+  if (prevId) {
+    const prevStep = steps.find((s) => s.id === prevId);
+    if (prevStep?.type === "start") (prevStep as StartStep).next = endId;
+    if (prevStep?.type === "page") (prevStep as PageStep).onSubmit = endId;
+    if (prevStep?.type === "script") (prevStep as ScriptStep).onSuccess = endId;
+  }
+  steps.push({ id: endId, type: "end", outcome: "success" } as EndStep);
+
+  return steps;
 }
 
 function generateSessionId(): string {
-  return "sess-" + crypto.randomUUID?.() ?? Math.random().toString(36).slice(2) + Date.now();
+  return "sess-" + (crypto.randomUUID?.() ?? Math.random().toString(36).slice(2) + Date.now());
+}
+
+function findStepById(flow: FlowStep[], id: StepId | undefined): FlowStep | undefined {
+  return id ? flow.find((s) => s.id === id) : undefined;
+}
+
+function findStartStep(flow: FlowStep[]): StartStep | undefined {
+  return flow.find((s) => s.type === "start") as StartStep | undefined;
 }
 
 export default function FormFill() {
@@ -31,11 +69,12 @@ export default function FormFill() {
   const [form, setForm] = useState<FormBySlug | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [sessionId] = useState(generateSessionId);
-  const [stepIndex, setStepIndex] = useState(0);
+  const [currentStepId, setCurrentStepId] = useState<StepId | null>(null);
   const [formData, setFormData] = useState<Record<string, Record<string, unknown>>>({});
   const [runningScript, setRunningScript] = useState(false);
-  const [complete, setComplete] = useState(false);
+  const [outcome, setOutcome] = useState<"success" | "failure" | null>(null);
 
+  // Load form
   useEffect(() => {
     if (!slug) return;
     fetch(API + "/forms/by-slug/" + encodeURIComponent(slug))
@@ -43,19 +82,29 @@ export default function FormFill() {
         if (!r.ok) throw new Error(r.status === 404 ? "Form not found" : "Failed to load form");
         return r.json();
       })
-      .then(setForm)
+      .then((f: FormBySlug) => {
+        setForm(f);
+        const flow = buildFlow(f);
+        const start = findStartStep(flow);
+        setCurrentStepId(start?.next ?? null);
+      })
       .catch((e) => setError(e.message));
   }, [slug]);
 
   const flow = form ? buildFlow(form) : [];
-  const currentStep = flow[stepIndex];
-  const currentPage = form && currentStep?.type === "page"
-    ? form.pages?.find((p) => p.id === currentStep.pageId)
-    : null;
+  const currentStep = findStepById(flow, currentStepId ?? undefined);
+  const currentPage =
+    form && currentStep?.type === "page"
+      ? form.pages?.find((p) => p.id === (currentStep as PageStep).pageId)
+      : null;
 
+  /** Run a script and return true if success, false if error */
   const runScriptStep = useCallback(
-    async (step: FlowStep & { type: "script" }, dataOverride?: Record<string, Record<string, unknown>>) => {
-      if (!form) return;
+    async (
+      step: ScriptStep,
+      dataOverride?: Record<string, Record<string, unknown>>
+    ): Promise<boolean> => {
+      if (!form) return true;
       setRunningScript(true);
       try {
         const res = await fetch(API + "/submit", {
@@ -69,7 +118,14 @@ export default function FormFill() {
             forms: [],
           }),
         });
-        if (!res.ok) throw new Error(await res.text());
+        const data = await res.json();
+        // Check if response indicates error
+        if (!res.ok || data.error) {
+          return false; // Script returned error
+        }
+        return true; // Script succeeded
+      } catch {
+        return false; // Network or other error
       } finally {
         setRunningScript(false);
       }
@@ -77,74 +133,81 @@ export default function FormFill() {
     [form, sessionId, formData]
   );
 
+  /** Process automatic script steps */
   useEffect(() => {
     if (!currentStep || currentStep.type !== "script" || !form) return;
     let cancelled = false;
+
     (async () => {
-      await runScriptStep(currentStep);
-      if (!cancelled) setStepIndex((i) => i + 1);
+      const scriptStep = currentStep as ScriptStep;
+      const success = await runScriptStep(scriptStep);
+      if (cancelled) return;
+
+      // Branch based on result
+      const nextId = success ? scriptStep.onSuccess : scriptStep.onError;
+      if (nextId) {
+        setCurrentStepId(nextId);
+      } else {
+        // No next step, end with appropriate outcome
+        setOutcome(success ? "success" : "failure");
+      }
     })();
+
     return () => {
       cancelled = true;
     };
-  }, [stepIndex, currentStep?.type, currentStep?.scriptId, form?._id]);
+  }, [currentStepId, currentStep?.type, form?._id, runScriptStep]);
 
-  const advance = useCallback(async () => {
-    if (currentStep?.type !== "page" || !currentPage || !form) return;
-    const pageData: Record<string, unknown> = {};
-    for (const f of currentPage.fields) {
-      const el = document.querySelector(`[name="${f.name}"]`) as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement | null;
+  /** Handle end steps */
+  useEffect(() => {
+    if (currentStep?.type === "end") {
+      setOutcome((currentStep as EndStep).outcome);
+    }
+  }, [currentStep]);
+
+  /** Get page data from form fields */
+  const getPageData = useCallback((page: PageDef): Record<string, unknown> => {
+    const data: Record<string, unknown> = {};
+    for (const f of page.fields) {
+      const el = document.querySelector(
+        `[name="${f.name}"]`
+      ) as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement | null;
       if (el) {
-        pageData[f.name] = el.type === "checkbox" ? (el as HTMLInputElement).checked : el.value;
+        data[f.name] = el.type === "checkbox" ? (el as HTMLInputElement).checked : el.value;
       }
     }
-    const newFormData = { ...formData, [currentStep.pageId]: pageData };
+    return data;
+  }, []);
+
+  /** Advance from a page step */
+  const advance = useCallback(async () => {
+    if (currentStep?.type !== "page" || !currentPage || !form) return;
+
+    const pageStep = currentStep as PageStep;
+    const pageData = getPageData(currentPage);
+    const newFormData = { ...formData, [pageStep.pageId]: pageData };
     setFormData(newFormData);
 
-    let next = stepIndex + 1;
-    while (next < flow.length && flow[next].type === "script") {
-      await runScriptStep(flow[next] as FlowStep & { type: "script" }, newFormData);
-      next++;
+    // Move to next step
+    const nextId = pageStep.onSubmit;
+    if (nextId) {
+      setCurrentStepId(nextId);
+    } else {
+      // No next step, complete with success
+      setOutcome("success");
     }
-    if (next >= flow.length) setComplete(true);
-    setStepIndex(next);
-  }, [currentStep, currentPage, form, flow, stepIndex, formData, runScriptStep]);
+  }, [currentStep, currentPage, form, formData, getPageData]);
 
+  /** Handle form submission (last page) */
   const handleSubmit = useCallback(
     async (e: React.FormEvent) => {
       e.preventDefault();
-      if (currentStep?.type === "page" && currentPage) {
-        const pageData: Record<string, unknown> = {};
-        for (const f of currentPage.fields) {
-          const el = document.querySelector(`[name="${f.name}"]`) as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement | null;
-          if (el) {
-            pageData[f.name] = el.type === "checkbox" ? (el as HTMLInputElement).checked : el.value;
-          }
-        }
-        const finalData = { ...formData, [currentStep.pageId]: pageData };
-        setFormData(finalData);
-        setRunningScript(true);
-        try {
-          await fetch(API + "/submit", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              session_id: sessionId,
-              formId: form!._id,
-              event: "onSubmit",
-              formData: finalData,
-              forms: [],
-            }),
-          });
-        } finally {
-          setRunningScript(false);
-        }
-        setComplete(true);
-      }
+      await advance();
     },
-    [currentStep, currentPage, form, formData, sessionId]
+    [advance]
   );
 
+  // Error state
   if (error) {
     return (
       <div className="form-fill">
@@ -154,30 +217,38 @@ export default function FormFill() {
     );
   }
 
+  // Loading state
   if (!form) {
     return <div className="form-fill"><p>Loading form…</p></div>;
   }
 
-  if (complete) {
+  // Complete state
+  if (outcome) {
     return (
-      <div className="form-fill form-fill-complete">
+      <div className={`form-fill form-fill-complete ${outcome === "failure" ? "form-fill-failure" : ""}`}>
         <h1>{form.name}</h1>
-        <p className="form-fill-done">Thank you. Your response has been submitted.</p>
+        <p className="form-fill-done">
+          {outcome === "success"
+            ? "Thank you. Your response has been submitted."
+            : "There was an issue with your submission."}
+        </p>
         <a href="/">Back to home</a>
       </div>
     );
   }
 
+  // Script running state
   if (currentStep?.type === "script") {
     return (
       <div className="form-fill">
         <h1>{form.name}</h1>
-        <p className="form-fill-running">{runningScript ? "Running…" : "Next…"}</p>
+        <p className="form-fill-running">{runningScript ? "Processing…" : "Moving to next step…"}</p>
       </div>
     );
   }
 
-  if (!currentPage) {
+  // No valid step
+  if (!currentPage || currentStep?.type !== "page") {
     return (
       <div className="form-fill">
         <h1>{form.name}</h1>
@@ -186,18 +257,16 @@ export default function FormFill() {
     );
   }
 
-  const progress = flow.length ? Math.round((stepIndex / flow.length) * 100) : 0;
-  const isLastPage = flow.slice(stepIndex + 1).every((s) => s.type === "script") || stepIndex + 1 >= flow.length;
+  const pageStep = currentStep as PageStep;
+
+  // Check if this is the last page (no onSubmit target or target is end node)
+  const nextStep = findStepById(flow, pageStep.onSubmit);
+  const isLastPage = !nextStep || nextStep.type === "end";
 
   return (
     <div className="form-fill">
       <h1>{form.name}</h1>
       {currentPage.title && <h2 className="form-fill-page-title">{currentPage.title}</h2>}
-      {flow.length > 1 && (
-        <div className="form-fill-progress" role="progressbar" aria-valuenow={progress} aria-valuemin={0} aria-valuemax={100}>
-          <div className="form-fill-progress-bar" style={{ width: `${progress}%` }} />
-        </div>
-      )}
       <form onSubmit={handleSubmit} className="form-fill-fields">
         {currentPage.fields.map((field) => (
           <label key={field.id} className="form-fill-field">
@@ -207,13 +276,13 @@ export default function FormFill() {
                 name={field.name}
                 placeholder={field.placeholder}
                 required={Boolean(field.validation?.required)}
-                defaultValue={(formData[currentStep.pageId]?.[field.name] as string) ?? ""}
+                defaultValue={(formData[pageStep.pageId]?.[field.name] as string) ?? ""}
               />
             ) : field.type === "checkbox" ? (
               <input
                 type="checkbox"
                 name={field.name}
-                defaultChecked={(formData[currentStep.pageId]?.[field.name] as boolean) ?? false}
+                defaultChecked={(formData[pageStep.pageId]?.[field.name] as boolean) ?? false}
               />
             ) : (
               <input
@@ -221,7 +290,7 @@ export default function FormFill() {
                 name={field.name}
                 placeholder={field.placeholder}
                 required={Boolean(field.validation?.required)}
-                defaultValue={(formData[currentStep.pageId]?.[field.name] as string) ?? ""}
+                defaultValue={(formData[pageStep.pageId]?.[field.name] as string) ?? ""}
               />
             )}
           </label>

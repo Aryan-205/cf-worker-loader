@@ -31,10 +31,50 @@ export interface FormScriptRef {
   order: number;
 }
 
-/** A single step in the form flow: show a form page or run a script */
-export type FlowStep =
-  | { type: "page"; pageId: string }
-  | { type: "script"; scriptId: string; event: string };
+/** Unique identifier for each step in the flow */
+export type StepId = string;
+
+interface BaseStep {
+  id: StepId;
+  position?: { x: number; y: number };
+}
+
+export interface PageStep extends BaseStep {
+  type: "page";
+  pageId: string;
+  onSubmit?: StepId;
+}
+
+export interface ScriptStep extends BaseStep {
+  type: "script";
+  scriptId: string;
+  event: string;
+  onSuccess?: StepId;
+  onError?: StepId;
+}
+
+export interface StartStep extends BaseStep {
+  type: "start";
+  next?: StepId;
+}
+
+export interface EndStep extends BaseStep {
+  type: "end";
+  outcome: "success" | "failure";
+}
+
+/** A single step in the form flow: show a form page, run a script, or control flow */
+export type FlowStep = PageStep | ScriptStep | StartStep | EndStep;
+
+/** Edge type for connections between flow steps */
+export type FlowEdgeHandle = "next" | "onSubmit" | "onSuccess" | "onError";
+
+export interface FlowEdge {
+  id: string;
+  source: StepId;
+  target: StepId;
+  sourceHandle?: FlowEdgeHandle;
+}
 
 export interface Form {
   id: string;

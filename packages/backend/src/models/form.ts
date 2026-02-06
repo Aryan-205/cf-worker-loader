@@ -23,10 +23,20 @@ const FormScriptRefSchema = new Schema({
 
 const FlowStepSchema = new Schema(
   {
-    type: { type: String, required: true, enum: ["page", "script"] },
+    id: { type: String, required: true },
+    type: { type: String, required: true, enum: ["page", "script", "start", "end"] },
     pageId: String,
     scriptId: { type: Schema.Types.ObjectId, ref: "Script" },
     event: String,
+    onSubmit: String,
+    onSuccess: String,
+    onError: String,
+    next: String,
+    outcome: { type: String, enum: ["success", "failure"] },
+    position: {
+      x: Number,
+      y: Number,
+    },
   },
   { _id: false }
 );

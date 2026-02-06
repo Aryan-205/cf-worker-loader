@@ -15,11 +15,15 @@ import {
   horizontalListSortingStrategy,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import type { FlowStep, PageDef } from "@orcratration/shared";
+import type { FlowStep, PageDef, ScriptStep } from "@orcratration/shared";
 
 const HOOK_EVENTS = ["onLoad", "onValidate", "onSubmit", "onPageChange"] as const;
 
 type ScriptOption = { _id: string; name: string };
+
+function generateId(): string {
+  return "step-" + Math.random().toString(36).slice(2, 9);
+}
 
 function StepNode({
   step,
@@ -67,10 +71,10 @@ function StepNode({
         ) : (
           <>
             <span className="flow-step-label">SCRIPT</span>
-            <span className="flow-step-title">{scriptName ?? step.scriptId}</span>
+            <span className="flow-step-title">{scriptName ?? (step as ScriptStep).scriptId}</span>
             <select
               className="flow-step-event"
-              value={step.event}
+              value={(step as ScriptStep).event}
               onChange={(e) => onEventChange?.(e.target.value)}
               onClick={(e) => e.stopPropagation()}
             >
@@ -141,11 +145,11 @@ export default function FlowBuilder({
   }
 
   function addPageStep(pageId: string) {
-    onFlowChange([...flow, { type: "page", pageId }]);
+    onFlowChange([...flow, { id: generateId(), type: "page", pageId }]);
   }
 
   function addScriptStep(scriptId: string, event: string) {
-    onFlowChange([...flow, { type: "script", scriptId, event }]);
+    onFlowChange([...flow, { id: generateId(), type: "script", scriptId, event }]);
   }
 
   return (
@@ -212,7 +216,7 @@ export default function FlowBuilder({
                 <div className="flow-empty">Add form pages and scripts above to build the flow</div>
               ) : (
                 flow.map((step, index) => (
-                  <span key={`${step.type}-${index}-${step.type === "page" ? step.pageId : step.scriptId}`} className="flow-step-wrap">
+                  <span key={`${step.type}-${index}-${step.type === "page" ? step.pageId : (step as ScriptStep).scriptId}`} className="flow-step-wrap">
                     <StepNode
                       step={step}
                       index={index}
