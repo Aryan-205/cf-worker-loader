@@ -28,9 +28,9 @@ const FlowStepSchema = new Schema(
     pageId: String,
     scriptId: { type: Schema.Types.ObjectId, ref: "Script" },
     event: String,
+    outputs: [String],
+    outputTargets: { type: Map, of: String },
     onSubmit: String,
-    onSuccess: String,
-    onError: String,
     next: String,
     outcome: { type: String, enum: ["success", "failure"] },
     position: {

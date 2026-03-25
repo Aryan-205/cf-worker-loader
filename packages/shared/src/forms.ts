@@ -49,8 +49,10 @@ export interface ScriptStep extends BaseStep {
   type: "script";
   scriptId: string;
   event: string;
-  onSuccess?: StepId;
-  onError?: StepId;
+  /** Output names for dynamic branching (e.g., ["gmail", "outlook", "other"]) */
+  outputs?: string[];
+  /** Map output name → target step ID */
+  outputTargets?: Record<string, StepId>;
 }
 
 export interface StartStep extends BaseStep {
@@ -67,7 +69,7 @@ export interface EndStep extends BaseStep {
 export type FlowStep = PageStep | ScriptStep | StartStep | EndStep;
 
 /** Edge type for connections between flow steps */
-export type FlowEdgeHandle = "next" | "onSubmit" | "onSuccess" | "onError";
+export type FlowEdgeHandle = "next" | "onSubmit";
 
 export interface FlowEdge {
   id: string;

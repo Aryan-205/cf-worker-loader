@@ -30,6 +30,8 @@ export interface Hook {
   setFieldError: (formId: string, fieldKey: string, message: string) => void;
   setRedirect: (url: string, status?: number) => void;
   setResponse: (payload: unknown, status?: number) => void;
+  /** Route to a custom output node by name */
+  setOutputNode: (name: string) => void;
   log: (level: LogLevel, msg: string, meta?: unknown) => void;
 }
 

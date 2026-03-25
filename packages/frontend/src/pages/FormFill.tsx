@@ -34,7 +34,13 @@ function buildFlow(form: FormBySlug): FlowStep[] {
       const prevStep = steps.find((s) => s.id === prevId);
       if (prevStep?.type === "start") (prevStep as StartStep).next = pageStepId;
       if (prevStep?.type === "page") (prevStep as PageStep).onSubmit = pageStepId;
-      if (prevStep?.type === "script") (prevStep as ScriptStep).onSuccess = pageStepId;
+      if (prevStep?.type === "script" && (prevStep as ScriptStep).outputTargets) {
+        // Legacy fallback: link first output to next step
+        const outputs = (prevStep as ScriptStep).outputs ?? [];
+        if (outputs.length > 0) {
+          (prevStep as ScriptStep).outputTargets![outputs[0]] = pageStepId;
+        }
+      }
     }
     steps.push({ id: pageStepId, type: "page", pageId: page.id } as PageStep);
     prevId = pageStepId;
@@ -45,7 +51,12 @@ function buildFlow(form: FormBySlug): FlowStep[] {
     const prevStep = steps.find((s) => s.id === prevId);
     if (prevStep?.type === "start") (prevStep as StartStep).next = endId;
     if (prevStep?.type === "page") (prevStep as PageStep).onSubmit = endId;
-    if (prevStep?.type === "script") (prevStep as ScriptStep).onSuccess = endId;
+    if (prevStep?.type === "script" && (prevStep as ScriptStep).outputTargets) {
+      const outputs = (prevStep as ScriptStep).outputs ?? [];
+      if (outputs.length > 0) {
+        (prevStep as ScriptStep).outputTargets![outputs[0]] = endId;
+      }
+    }
   }
   steps.push({ id: endId, type: "end", outcome: "success" } as EndStep);
 
@@ -98,13 +109,14 @@ export default function FormFill() {
       ? form.pages?.find((p) => p.id === (currentStep as PageStep).pageId)
       : null;
 
-  /** Run a script and return true if success, false if error */
+
+  /** Run a script and return result with success status and optional outputNode */
   const runScriptStep = useCallback(
     async (
       step: ScriptStep,
       dataOverride?: Record<string, Record<string, unknown>>
-    ): Promise<boolean> => {
-      if (!form) return true;
+    ): Promise<{ success: boolean; outputNode?: string }> => {
+      if (!form) return { success: true };
       setRunningScript(true);
       try {
         const res = await fetch(API + "/submit", {
@@ -121,11 +133,11 @@ export default function FormFill() {
         const data = await res.json();
         // Check if response indicates error
         if (!res.ok || data.error) {
-          return false; // Script returned error
+          return { success: false };
         }
-        return true; // Script succeeded
+        return { success: true, outputNode: data.outputNode };
       } catch {
-        return false; // Network or other error
+        return { success: false };
       } finally {
         setRunningScript(false);
       }
@@ -140,16 +152,21 @@ export default function FormFill() {
 
     (async () => {
       const scriptStep = currentStep as ScriptStep;
-      const success = await runScriptStep(scriptStep);
+      const result = await runScriptStep(scriptStep);
       if (cancelled) return;
 
-      // Branch based on result
-      const nextId = success ? scriptStep.onSuccess : scriptStep.onError;
+      // Determine next step based on output node
+      let nextId: string | undefined;
+
+      if (result.outputNode && scriptStep.outputTargets) {
+        nextId = scriptStep.outputTargets[result.outputNode];
+      }
+
       if (nextId) {
         setCurrentStepId(nextId);
       } else {
-        // No next step, end with appropriate outcome
-        setOutcome(success ? "success" : "failure");
+        // No matching output target, end with appropriate outcome
+        setOutcome(result.success ? "success" : "failure");
       }
     })();
 

@@ -14,7 +14,7 @@ import {
     MarkerType,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { useCallback, useEffect, useMemo, useId } from "react";
+import { useCallback, useEffect, useMemo, useId, useState } from "react";
 import type { FlowStep, PageDef, PageStep, ScriptStep, StartStep, EndStep } from "@orcratration/shared";
 
 type ScriptOption = { _id: string; name: string };
@@ -56,34 +56,47 @@ function PageNode({ data }: NodeProps) {
 }
 
 function ScriptNode({ data }: NodeProps) {
+    const outputs = (data.outputs as string[]) ?? [];
+
+    // Generate colors for outputs
+    const getOutputColor = (index: number) => {
+        const colors = ["#3b82f6", "#8b5cf6", "#ec4899", "#f59e0b", "#10b981", "#06b6d4"];
+        return colors[index % colors.length];
+    };
+
     return (
-        <div className="flow-node-script">
+        <div className="flow-node-script flow-node-script-custom">
             <Handle type="target" position={Position.Left} id="target" className="flow-handle" />
-            <div className="flow-node-icon">⚡</div>
-            <div className="flow-node-content">
-                <div className="flow-node-label">SCRIPT</div>
-                <div className="flow-node-title">{data.scriptName as string ?? "Script"}</div>
+
+            <div className="flow-node-main">
+                <div className="flow-node-icon">⚡</div>
+                <div className="flow-node-content">
+                    <div className="flow-node-label">SCRIPT</div>
+                    <div className="flow-node-title">{data.scriptName as string ?? "Script"}</div>
+                </div>
             </div>
-            <div className="flow-node-handles">
-                <Handle
-                    type="source"
-                    position={Position.Right}
-                    id="onSuccess"
-                    className="flow-handle flow-handle-success"
-                    style={{ top: "30%" }}
-                />
-                <Handle
-                    type="source"
-                    position={Position.Right}
-                    id="onError"
-                    className="flow-handle flow-handle-error"
-                    style={{ top: "70%" }}
-                />
-            </div>
-            <div className="flow-handle-labels">
-                <span className="flow-handle-label success">✓</span>
-                <span className="flow-handle-label error">✗</span>
-            </div>
+
+            {outputs.length > 0 && (
+                <div className="flow-node-outputs">
+                    {outputs.map((output, index) => (
+                        <div key={output} className="flow-output-item">
+                            <span
+                                className="flow-output-name"
+                                style={{ color: getOutputColor(index) }}
+                            >
+                                {output}
+                            </span>
+                            <Handle
+                                type="source"
+                                position={Position.Right}
+                                id={`output:${output}`}
+                                className="flow-handle flow-handle-custom"
+                                style={{ background: getOutputColor(index) }}
+                            />
+                        </div>
+                    ))}
+                </div>
+            )}
         </div>
     );
 }
@@ -154,31 +167,33 @@ function flowStepsToReactFlow(
             }
         } else if (step.type === "script") {
             const script = scripts.find((s) => s._id === step.scriptId);
+            const outputs = step.outputs ?? [];
             nodes.push({
                 id: step.id,
                 type: "script",
                 position: pos,
-                data: { scriptId: step.scriptId, scriptName: script?.name ?? step.scriptId, event: step.event },
+                data: {
+                    scriptId: step.scriptId,
+                    scriptName: script?.name ?? step.scriptId,
+                    event: step.event,
+                    outputs,
+                },
             });
-            if (step.onSuccess) {
-                edges.push({
-                    id: `${step.id}-onSuccess`,
-                    source: step.id,
-                    target: step.onSuccess,
-                    sourceHandle: "onSuccess",
-                    markerEnd: { type: MarkerType.ArrowClosed },
-                    style: { stroke: "#22c55e" },
-                });
-            }
-            if (step.onError) {
-                edges.push({
-                    id: `${step.id}-onError`,
-                    source: step.id,
-                    target: step.onError,
-                    sourceHandle: "onError",
-                    markerEnd: { type: MarkerType.ArrowClosed },
-                    style: { stroke: "#ef4444" },
-                });
+
+            // Create edges for output targets
+            if (outputs.length > 0 && step.outputTargets) {
+                for (const output of outputs) {
+                    const target = step.outputTargets[output];
+                    if (target) {
+                        edges.push({
+                            id: `${step.id}-output:${output}`,
+                            source: step.id,
+                            target,
+                            sourceHandle: `output:${output}`,
+                            markerEnd: { type: MarkerType.ArrowClosed },
+                        });
+                    }
+                }
             }
         }
     }
@@ -218,16 +233,24 @@ function reactFlowToFlowSteps(nodes: Node[], edges: Edge[]): FlowStep[] {
                 onSubmit: onSubmitEdge?.target,
             } as PageStep);
         } else if (node.type === "script") {
-            const onSuccessEdge = outgoingEdges.find((e) => e.sourceHandle === "onSuccess");
-            const onErrorEdge = outgoingEdges.find((e) => e.sourceHandle === "onError");
+            const outputs = (node.data.outputs as string[]) ?? [];
+
+            // Build outputTargets from output edges
+            const outputTargets: Record<string, string> = {};
+            for (const output of outputs) {
+                const edge = outgoingEdges.find((e) => e.sourceHandle === `output:${output}`);
+                if (edge?.target) {
+                    outputTargets[output] = edge.target;
+                }
+            }
             steps.push({
                 id: node.id,
                 type: "script",
                 position,
                 scriptId: node.data.scriptId as string,
                 event: (node.data.event as string) ?? "onSubmit",
-                onSuccess: onSuccessEdge?.target,
-                onError: onErrorEdge?.target,
+                outputs,
+                outputTargets,
             } as ScriptStep);
         }
     }
@@ -275,12 +298,6 @@ export default function DynamicFlowBuilder({
                     {
                         ...params,
                         markerEnd: { type: MarkerType.ArrowClosed },
-                        style:
-                            params.sourceHandle === "onSuccess"
-                                ? { stroke: "#22c55e" }
-                                : params.sourceHandle === "onError"
-                                    ? { stroke: "#ef4444" }
-                                    : undefined,
                     },
                     eds
                 )
@@ -296,6 +313,45 @@ export default function DynamicFlowBuilder({
         },
         [setEdges]
     );
+
+    // Edit script outputs modal
+    const [editingNode, setEditingNode] = useState<string | null>(null);
+    const [editingOutputs, setEditingOutputs] = useState<string[]>([]);
+
+    const onNodeDoubleClick = useCallback(
+        (_event: React.MouseEvent, node: Node) => {
+            if (node.type === "script") {
+                setEditingNode(node.id);
+                setEditingOutputs((node.data.outputs as string[]) ?? []);
+            }
+        },
+        []
+    );
+
+    const saveOutputs = useCallback(() => {
+        if (!editingNode) return;
+        // Remove empty outputs and duplicates
+        const cleanOutputs = [...new Set(editingOutputs.filter((o) => o.trim()))];
+        setNodes((nds) =>
+            nds.map((n) =>
+                n.id === editingNode
+                    ? { ...n, data: { ...n.data, outputs: cleanOutputs } }
+                    : n
+            )
+        );
+        // Remove edges that no longer have valid handles
+        setEdges((eds) =>
+            eds.filter((e) => {
+                if (e.source !== editingNode) return true;
+                if (e.sourceHandle?.startsWith("output:")) {
+                    const outputName = e.sourceHandle.replace("output:", "");
+                    return cleanOutputs.includes(outputName);
+                }
+                return false;
+            })
+        );
+        setEditingNode(null);
+    }, [editingNode, editingOutputs, setNodes, setEdges]);
 
     // Add nodes
     function addStartNode() {
@@ -407,6 +463,7 @@ export default function DynamicFlowBuilder({
                     onEdgesChange={onEdgesChange}
                     onConnect={onConnect}
                     onEdgeClick={onEdgeClick}
+                    onNodeDoubleClick={onNodeDoubleClick}
                     nodeTypes={nodeTypes}
                     fitView
                     defaultEdgeOptions={{
@@ -419,8 +476,60 @@ export default function DynamicFlowBuilder({
             </div>
 
             <p className="dynamic-flow-hint">
-                Drag nodes to position. Connect handles: Form → onSubmit, Script → Success (✓) or Error (✗).
+                Drag nodes to position. Double-click script nodes to edit custom outputs.
             </p>
+
+            {/* Edit Outputs Modal */}
+            {editingNode && (
+                <div className="flow-modal-overlay" onClick={() => setEditingNode(null)}>
+                    <div className="flow-modal" onClick={(e) => e.stopPropagation()}>
+                        <h3>Edit Script Outputs</h3>
+                        <p className="flow-modal-hint">
+                            Define custom output names for branching. Leave empty for default Success/Error.
+                        </p>
+                        <div className="flow-outputs-list">
+                            {editingOutputs.map((output, index) => (
+                                <div key={index} className="flow-output-row">
+                                    <input
+                                        type="text"
+                                        value={output}
+                                        placeholder="Output name (e.g., gmail)"
+                                        onChange={(e) => {
+                                            const updated = [...editingOutputs];
+                                            updated[index] = e.target.value;
+                                            setEditingOutputs(updated);
+                                        }}
+                                    />
+                                    <button
+                                        type="button"
+                                        className="btn-remove"
+                                        onClick={() => {
+                                            setEditingOutputs(editingOutputs.filter((_, i) => i !== index));
+                                        }}
+                                    >
+                                        ×
+                                    </button>
+                                </div>
+                            ))}
+                        </div>
+                        <button
+                            type="button"
+                            className="btn-flow-add"
+                            onClick={() => setEditingOutputs([...editingOutputs, ""])}
+                        >
+                            + Add Output
+                        </button>
+                        <div className="flow-modal-actions">
+                            <button type="button" className="btn-secondary" onClick={() => setEditingNode(null)}>
+                                Cancel
+                            </button>
+                            <button type="button" className="btn-primary" onClick={saveOutputs}>
+                                Save
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
         </div>
     );
 }

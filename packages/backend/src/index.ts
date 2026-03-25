@@ -56,7 +56,7 @@ app.post("/api/submit", async (c) => {
     formData: Record<string, Record<string, unknown>>;
     forms?: unknown[];
   };
-  const { session_id, formId, event = "onSubmit", formData, forms = [] } = body;
+  const { session_id, formId, event = "onSubmit", formData } = body;
   if (!session_id || !formId) {
     return c.json({ error: "session_id and formId required" }, 400);
   }
@@ -119,26 +119,68 @@ app.post("/api/submit", async (c) => {
       byScript.set(sid, { workerUrl: doc.workerUrl });
     }
   }
-  let lastResponse: unknown = { ok: true };
-  for (const [, { workerUrl }] of byScript) {
+
+  // If deployed workers exist, call them
+  if (byScript.size > 0) {
+    let lastResponse: unknown = { ok: true };
+    for (const [, { workerUrl }] of byScript) {
+      try {
+        const res = await fetch(workerUrl + "/", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        lastResponse = await res.json();
+        if (!res.ok) {
+          return c.json(lastResponse, (res.status as 400) || 400);
+        }
+      } catch (err) {
+        return c.json(
+          { error: "worker_error", message: err instanceof Error ? err.message : String(err) },
+          502
+        );
+      }
+    }
+    return c.json(lastResponse);
+  }
+
+  // Fallback: execute scripts locally (dev mode)
+  const scriptDocs = await Script.find({ _id: { $in: scriptIds } }).lean();
+  const { executeScriptLocally } = await import("./lib/local-executor.js");
+
+  let lastResult: unknown = { ok: true };
+  for (const ref of forEvent) {
+    const scriptId = String(ref.scriptId);
+    const doc = scriptDocs.find((s) => String((s as { _id: unknown })._id) === scriptId) as { source: string } | undefined;
+    if (!doc?.source) continue;
     try {
-      const res = await fetch(workerUrl + "/", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      lastResponse = await res.json();
-      if (!res.ok) {
-        return c.json(lastResponse, (res.status as 400) || 400);
+      const ctx = {
+        session_id,
+        formId,
+        formData,
+        forms: formsMeta as import("@orcratration/shared").FormsMeta,
+        store: { get: async () => null },
+      };
+      const result = await executeScriptLocally(doc.source, ctx);
+      if (!result.ok && result.error) {
+        return c.json(
+          { error: result.error.errorKey, message: result.error.message },
+          result.error.status as 400
+        );
+      }
+      if (result.response) {
+        lastResult = result.response.payload;
+      } else {
+        lastResult = { ok: true, outputNode: result.outputNode, fieldErrors: result.fieldErrors };
       }
     } catch (err) {
       return c.json(
-        { error: "worker_error", message: err instanceof Error ? err.message : String(err) },
-        502
+        { error: "script_runtime_error", message: err instanceof Error ? err.message : String(err) },
+        500
       );
     }
   }
-  return c.json(lastResponse);
+  return c.json(lastResult);
 });
 
 const port = Number(process.env.PORT) || 3000;
